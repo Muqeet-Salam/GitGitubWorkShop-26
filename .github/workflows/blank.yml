@@ -1,0 +1,72 @@
+name: Commit Window Upload
+
+on:
+  schedule:
+    - cron: "0-9 * * * *"
+
+jobs:
+  publish-commit-metadata:
+    runs-on: ubuntu-latest
+    env:
+      TARGET_REPO: cbitosc/GitGitubWorkShop-26
+      TARGET_REPO_PAT: ${{ secrets.TARGET_REPO_PAT }}
+      TARGET_REPO_BASE_BRANCH: main
+
+    steps:
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Validate required secrets
+        run: |
+          set -euo pipefail
+          if [ -z "${TARGET_REPO_PAT:-}" ]; then
+            echo "TARGET_REPO_PAT is not set"
+            exit 1
+          fi
+
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          token: ${{ env.TARGET_REPO_PAT }}
+          path: target-repo
+
+      - name: Generate metadata and create PR
+        run: |
+          set -euo pipefail
+
+          branch_name="commit-data-$(date +%s)"
+          dest_path="commit-metadata/${branch_name}.json"
+
+          cd target-repo
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b "$branch_name"
+
+          mkdir -p commit-metadata
+
+          # Minimal metadata (since no push event context)
+          jq -n \
+            --arg timestamp "$(date -u)" \
+            '{generated_at:$timestamp}' \
+            > "$dest_path"
+
+          git add "$dest_path"
+          git commit -m "Add scheduled commit metadata"
+          git push -u origin "$branch_name"
+
+          pr_response=$(curl -sSL -X POST "https://api.github.com/repos/${TARGET_REPO}/pulls" \
+            -H "Authorization: token ${TARGET_REPO_PAT}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg title "Auto PR: scheduled metadata" \
+              --arg head "$branch_name" \
+              --arg base "$TARGET_REPO_BASE_BRANCH" \
+              --arg body "Auto-generated metadata at $(date -u)" \
+              '{title:$title,head:$head,base:$base,body:$body}')")
+
+          echo "PR response:"
+          echo "$pr_response"
