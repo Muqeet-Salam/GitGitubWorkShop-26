@@ -1,8 +1,9 @@
 name: Commit Window Upload
 
 on:
-  schedule:
-    - cron: "0-9 * * * *"
+  push:
+    branches:
+      - master
 
 jobs:
   publish-commit-metadata:
@@ -10,7 +11,7 @@ jobs:
     env:
       TARGET_REPO: cbitosc/GitGitubWorkShop-26
       TARGET_REPO_PAT: ${{ secrets.TARGET_REPO_PAT }}
-      TARGET_REPO_BASE_BRANCH: main
+      TARGET_REPO_BASE_BRANCH: master
 
     steps:
       - name: Install jq
@@ -31,11 +32,54 @@ jobs:
           token: ${{ env.TARGET_REPO_PAT }}
           path: target-repo
 
-      - name: Generate metadata and create PR
+      - name: Filter commits and create PR
         run: |
           set -euo pipefail
 
-          branch_name="commit-data-$(date +%s)"
+          # Extract commits from push event
+          if ! commits=$(jq -c '.commits[]' "$GITHUB_EVENT_PATH"); then
+            echo "No commits found in event payload."
+            exit 0
+          fi
+
+          matched=""
+          summaries=""
+
+          while IFS= read -r commit; do
+            ts=$(jq -r '.timestamp' <<<"$commit")
+
+            # Extract minute safely (00–59)
+            commit_minute=$(date -u -d "$ts" +%M)
+            commit_minute=$((10#$commit_minute))
+
+            # ✅ Only include commits from first 10 minutes of hour
+            if [ "$commit_minute" -lt 10 ]; then
+              username=$(jq -r '.author.username // .author.name' <<<"$commit")
+              commit_hash=$(jq -r '.id' <<<"$commit")
+              message=$(jq -r '.message' <<<"$commit")
+
+              matched+=$(jq -n \
+                --arg username "$username" \
+                --arg commit_hash "$commit_hash" \
+                --arg message "$message" \
+                --arg timestamp "$ts" \
+                '{username:$username,commit_hash:$commit_hash,message:$message,timestamp:$timestamp}')$'\n'
+
+              summaries+="- $commit_hash: $message by $username"$'\n'
+            fi
+          done <<<"$commits"
+
+          if [ -z "$matched" ]; then
+            echo "No commits in HH:00–HH:09 window."
+            exit 0
+          fi
+
+          matched_json=$(printf '%s' "$matched" | jq -s '.')
+
+          # Unique branch name
+          branch_name="commit-data-${GITHUB_SHA:0:7}-$(date +%s)"
+          branch_name=${branch_name//[^a-zA-Z0-9._-]/-}
+
           dest_path="commit-metadata/${branch_name}.json"
 
           cd target-repo
@@ -45,28 +89,37 @@ jobs:
 
           git checkout -b "$branch_name"
 
+          # Ensure directory exists
           mkdir -p commit-metadata
 
-          # Minimal metadata (since no push event context)
+          # Create JSON file
           jq -n \
-            --arg timestamp "$(date -u)" \
-            '{generated_at:$timestamp}' \
+            --arg source_repo "$GITHUB_REPOSITORY" \
+            --arg source_ref "$GITHUB_REF" \
+            --arg source_sha "$GITHUB_SHA" \
+            --argjson commits "$matched_json" \
+            '{source_repo:$source_repo, source_ref:$source_ref, source_sha:$source_sha, commits:$commits}' \
             > "$dest_path"
 
           git add "$dest_path"
-          git commit -m "Add scheduled commit metadata"
+          git commit -m "Add commit metadata for ${GITHUB_REPOSITORY}@${GITHUB_SHA:0:7}"
           git push -u origin "$branch_name"
 
+          # Create PR
           pr_response=$(curl -sSL -X POST "https://api.github.com/repos/${TARGET_REPO}/pulls" \
             -H "Authorization: token ${TARGET_REPO_PAT}" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
             -d "$(jq -n \
-              --arg title "Auto PR: scheduled metadata" \
+              --arg title "Auto PR: commit metadata from ${GITHUB_REPOSITORY}@${GITHUB_SHA:0:7}" \
               --arg head "$branch_name" \
               --arg base "$TARGET_REPO_BASE_BRANCH" \
-              --arg body "Auto-generated metadata at $(date -u)" \
+              --arg body "Matching commits:\n${summaries}" \
               '{title:$title,head:$head,base:$base,body:$body}')")
 
-          echo "PR response:"
-          echo "$pr_response"
+          if echo "$pr_response" | jq -e '.html_url' > /dev/null; then
+            echo "PR created: $(jq -r '.html_url' <<< "$pr_response")"
+          else
+            echo "PR creation failed:"
+            echo "$pr_response"
+          fi
