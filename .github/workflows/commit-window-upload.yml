@@ -1,26 +1,24 @@
 name: Commit Window Upload
 
 on:
-  push:
-    branches:
-      - main
+  schedule:
+    - cron: "0-9 * * * *"
 
 jobs:
   publish-commit-metadata:
     runs-on: ubuntu-latest
     env:
-      COMMIT_WINDOW_MINUTES: 10
       TARGET_REPO: cbitosc/GitGitubWorkShop-26
       TARGET_REPO_PAT: ${{ secrets.TARGET_REPO_PAT }}
       TARGET_REPO_BASE_BRANCH: main
+
     steps:
-      - name: Validate required secrets and inputs
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Validate required secrets
         run: |
           set -euo pipefail
-          if [ -z "${TARGET_REPO:-}" ]; then
-            echo "TARGET_REPO is not set"
-            exit 1
-          fi
           if [ -z "${TARGET_REPO_PAT:-}" ]; then
             echo "TARGET_REPO_PAT is not set"
             exit 1
@@ -30,76 +28,45 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.TARGET_REPO }}
-          token: ${{ secrets.TARGET_REPO_PAT }}
+          token: ${{ env.TARGET_REPO_PAT }}
           path: target-repo
 
-      - name: Create metadata branch and open PR
+      - name: Generate metadata and create PR
         run: |
           set -euo pipefail
 
-          window_sec=$((COMMIT_WINDOW_MINUTES * 60))
-          now=$(date -u +%s)
-
-          if ! commits=$(jq -c '.commits[]' "$GITHUB_EVENT_PATH"); then
-            echo "No commits found in event payload."
-            exit 0
-          fi
-
-          matched=""
-          summaries=""
-          while IFS= read -r commit; do
-            ts=$(jq -r '.timestamp' <<<"$commit")
-            commit_sec=$(date -u -d "$ts" +%s)
-            delta=$((now - commit_sec))
-            if [ "${delta#-}" -le "$window_sec" ]; then
-              username=$(jq -r '.author.username // .author.name' <<<"$commit")
-              commit_hash=$(jq -r '.id' <<<"$commit")
-              message=$(jq -r '.message' <<<"$commit")
-
-              matched+=$(jq -n \
-                --arg username "$username" \
-                --arg commit_hash "$commit_hash" \
-                --arg message "$message" \
-                --arg timestamp "$ts" \
-                '{username:$username,commit_hash:$commit_hash,message:$message,timestamp:$timestamp}')$'\n'
-
-              summaries+="- $commit_hash: $message by $username"$'\n'
-            fi
-          done <<<"$commits"
-
-          if [ -z "$matched" ]; then
-            echo "No commits fall within the ${COMMIT_WINDOW_MINUTES}-minute window."
-            exit 0
-          fi
-
-          matched_json=$(printf '%s' "$matched" | jq -s '.')
-          branch_name="commit-data-${GITHUB_SHA:0:7}"
-          branch_name=${branch_name//[^a-zA-Z0-9._-]/-}
+          branch_name="commit-data-$(date +%s)"
           dest_path="commit-metadata/${branch_name}.json"
 
           cd target-repo
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git checkout -b "$branch_name"
 
+          mkdir -p commit-metadata
+
+          # Minimal metadata (since no push event context)
           jq -n \
-            --arg source_repo "$GITHUB_REPOSITORY" \
-            --arg source_ref "$GITHUB_REF" \
-            --arg source_sha "$GITHUB_SHA" \
-            --argjson commits "$matched_json" \
-            '{source_repo:$source_repo, source_ref:$source_ref, source_sha:$source_sha, commits:$commits}' \
+            --arg timestamp "$(date -u)" \
+            '{generated_at:$timestamp}' \
             > "$dest_path"
 
           git add "$dest_path"
-          git commit -m "Add commit metadata for ${GITHUB_REPOSITORY}@${GITHUB_SHA:0:7}"
+          git commit -m "Add scheduled commit metadata"
           git push -u origin "$branch_name"
 
-          pr_title="Auto PR: commit metadata from ${GITHUB_REPOSITORY}@${GITHUB_SHA:0:7}"
-          pr_body="Auto-generated commit metadata from ${GITHUB_REPOSITORY}.\n\nSource ref: ${GITHUB_REF}\nMatching commits:\n${summaries}"
-          pr_response=$(curl -fsSL -X POST "https://api.github.com/repos/${TARGET_REPO}/pulls" \
+          pr_response=$(curl -sSL -X POST "https://api.github.com/repos/${TARGET_REPO}/pulls" \
             -H "Authorization: token ${TARGET_REPO_PAT}" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n --arg title "$pr_title" --arg head "$branch_name" --arg base "$TARGET_REPO_BASE_BRANCH" --arg body "$pr_body" '{title:$title,head:$head,base:$base,body:$body}')")
+            -d "$(jq -n \
+              --arg title "Auto PR: scheduled metadata" \
+              --arg head "$branch_name" \
+              --arg base "$TARGET_REPO_BASE_BRANCH" \
+              --arg body "Auto-generated metadata at $(date -u)" \
+              '{title:$title,head:$head,base:$base,body:$body}')")
 
-          echo "PR created: $(jq -r '.html_url' <<< "$pr_response")"
+          echo "PR response:"
+          echo "$pr_response"
