@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       COMMIT_WINDOW_MINUTES: 10
-      TARGET_REPO: ${{ secrets.TARGET_REPO }}
+      TARGET_REPO: cbitosc/GitGitubWorkShop-26
       TARGET_REPO_PAT: ${{ secrets.TARGET_REPO_PAT }}
       TARGET_REPO_BASE_BRANCH: main
     steps:
