@@ -39,12 +39,6 @@ jobs:
 
           window_sec=$((COMMIT_WINDOW_MINUTES * 60))
           now=$(date -u +%s)
-          current_minute=$(date -u +%M | sed 's/^0*//')
-
-          if [ "$current_minute" -ge 10 ]; then
-            echo "Current time is not within the first 10 minutes of the hour; skipping PR creation."
-            exit 0
-          fi
 
           if ! commits=$(jq -c '.commits[]' "$GITHUB_EVENT_PATH"); then
             echo "No commits found in event payload."
